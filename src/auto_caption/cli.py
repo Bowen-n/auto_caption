@@ -90,6 +90,42 @@ def main(
             help="Tighten segment start/end to word-level timings so real silence gaps are kept.",
         ),
     ] = True,
+    padding: Annotated[
+        float,
+        typer.Option(
+            "--padding",
+            min=0.0,
+            help=(
+                "Seconds of cushion added to each subtitle's start and end on top of "
+                "the tight word-level span. 0 means caption timing covers exactly the "
+                "speaking interval - nothing more, nothing less (recommended for "
+                "maximal accuracy). Raise to e.g. 0.05 if subtitles feel like they "
+                "flash in/out too abruptly and you want them to appear slightly "
+                "earlier and linger slightly longer. The value is auto-clamped to "
+                "the real silence between neighbouring segments, so increasing it "
+                "will never cause overlapping captions. Only takes effect with "
+                "--tight-timestamps."
+            ),
+        ),
+    ] = 0.0,
+    min_duration: Annotated[
+        float,
+        typer.Option(
+            "--min-duration",
+            min=0.0,
+            help=(
+                "Minimum on-screen time for each caption, in seconds. Very short "
+                "utterances (single-character interjections like 'yeah' / 'hmm' / "
+                "'嗯') may only last ~100-200ms - faithfully using their exact "
+                "duration makes them flash by before a viewer can read them. This "
+                "floor stretches such captions so they stay visible long enough. "
+                "The stretch never crosses into the next caption's start, so it "
+                "will not cause overlaps. Default 0.2 is a mild readability guard; "
+                "set to 0 for strictly exact speech-interval timing. Only takes "
+                "effect with --tight-timestamps."
+            ),
+        ),
+    ] = 0.2,
     verbose: Annotated[
         bool,
         typer.Option(
@@ -142,7 +178,11 @@ def main(
         )
         raise typer.Exit(code=1)
 
-    segments = tighten_segments(result.segments) if tight_timestamps else result.segments
+    segments = (
+        tighten_segments(result.segments, padding=padding, min_duration=min_duration)
+        if tight_timestamps
+        else result.segments
+    )
     written = export_subtitle(segments, output, fmt=fmt_l)
     console.print(f"[bold green]Subtitle written[/bold green]: {written}")
 

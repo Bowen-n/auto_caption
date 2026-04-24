@@ -13,34 +13,97 @@ def tighten_segments(
     segments: Iterable[dict[str, Any]],
     *,
     min_duration: float = 0.2,
-    padding: float = 0.05,
+    padding: float = 0.0,
 ) -> list[dict[str, Any]]:
-    """Tighten each segment's start/end using word-level timestamps.
+    """Replace each segment's start/end with the true word-level span.
 
-    Whisper's default segment timestamps slice the audio contiguously, so the
-    ``end`` of one segment often equals the ``start`` of the next and silent
-    gaps get absorbed. When ``word_timestamps`` is enabled every segment
-    carries a ``words`` list; this function recomputes ``start`` / ``end``
-    from those word timings so real silence gaps are preserved. Segments
-    without ``words`` are left untouched.
+    Whisper's default segment timestamps slice the audio contiguously: the
+    ``end`` of one segment usually equals the ``start`` of the next, and any
+    silence between sentences gets absorbed into the neighbouring caption.
+    When ``word_timestamps`` is enabled every segment carries a ``words``
+    list; this function rebuilds each segment's ``start`` / ``end`` from the
+    earliest and latest word timings so only the real speaking interval is
+    kept. Segments without a ``words`` list are left untouched.
+
+    Visual overview (time flows left -> right, '#' = voiced, '.' = silence)::
+
+        raw whisper segments (back-to-back, eat silence):
+            seg A |###### . . . . ######|
+            seg B                        |###### . . ######|
+                  ^-- end[A] == start[B], gap lost
+
+        word-level timings inside each segment:
+            seg A words:  [###]   [##]         [#####]
+            seg B words:                 [####]        [##]
+
+        after tighten_segments (padding=0, min_duration=0):
+            seg A |###------#####|
+            seg B                       |####-----##|
+                                 ^^^^^^^ real silence preserved
+
+        with padding=p (clamped by real silence, so never overlaps):
+            seg A |<-p ###------##### p->|
+            seg B                  |<-p ####-----## p->|
+
+        with min_duration=d (short captions are stretched to >= d,
+        but only as far as the next segment allows):
+            short seg: |#|  ->  |#----------|   (length becomes d)
+
+    Parameters
+    ----------
+    min_duration:
+        Minimum on-screen time in seconds for each caption. Acts as a
+        readability floor for very short utterances (e.g. single-character
+        interjections). The stretch is clamped to the next segment's start
+        so it never creates overlaps. Set to ``0`` to disable.
+    padding:
+        Extra seconds added to both sides of the tight word span. ``0``
+        means captions match the exact speaking interval. Raise for a
+        smoother reading feel; auto-clamped to the real silence between
+        neighbours so adjacent captions never overlap.
     """
-    tightened: list[dict[str, Any]] = []
-    for seg in segments:
-        new_seg = dict(seg)
+    seg_list = [dict(s) for s in segments]
+
+    bounds: list[tuple[float, float] | None] = []
+    for seg in seg_list:
         word_times = [
             (float(w["start"]), float(w["end"]))
             for w in (seg.get("words") or [])
             if w.get("start") is not None and w.get("end") is not None
         ]
-        if word_times:
-            start = max(0.0, min(s for s, _ in word_times) - padding)
-            end = max(e for _, e in word_times) + padding
-            if end - start < min_duration:
-                end = start + min_duration
-            new_seg["start"] = start
-            new_seg["end"] = end
-        tightened.append(new_seg)
-    return tightened
+        bounds.append(
+            (min(s for s, _ in word_times), max(e for _, e in word_times))
+            if word_times
+            else None
+        )
+
+    for i, seg in enumerate(seg_list):
+        b = bounds[i]
+        if b is None:
+            continue
+        raw_start, raw_end = b
+
+        prev_end = next(
+            (bounds[j][1] for j in range(i - 1, -1, -1) if bounds[j] is not None),
+            0.0,
+        )
+        next_start = next(
+            (bounds[j][0] for j in range(i + 1, len(seg_list)) if bounds[j] is not None),
+            float("inf"),
+        )
+
+        left_room = max(0.0, raw_start - prev_end)
+        right_room = max(0.0, next_start - raw_end)
+        start = max(0.0, raw_start - min(padding, left_room))
+        end = raw_end + min(padding, right_room)
+
+        if end - start < min_duration:
+            end = min(start + min_duration, next_start)
+
+        seg["start"] = start
+        seg["end"] = end
+
+    return seg_list
 
 
 def _format_timestamp(seconds: float, *, comma: bool = True) -> str:
